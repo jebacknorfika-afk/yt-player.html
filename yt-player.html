@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>sd-investigationboard yt-player</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  #p { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; }
+  #st { position: absolute; left: 10px; bottom: 8px; right: 10px; color: #9fb3d9; font: 600 15px/1.3 "Segoe UI", Arial, sans-serif; text-shadow: 0 1px 2px #000; pointer-events: none; z-index: 5; }
+  #err { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 6%; box-sizing: border-box;
+    background: #14161c; color: #f2f3f7; font: 600 26px/1.35 "Segoe UI", Arial, sans-serif; }
+</style>
+</head>
+<body>
+<div id="p"></div>
+<div id="err"></div>
+<div id="st"></div>
+<script>
+  // Odtwarzacz YouTube sterowany przez rodzica (whiteboard.html) przez postMessage:
+  //   { type: 'yt', id: 'VIDEO_ID' | '', playing: bool, t: sekundy, vol: 0..1 }  (pola opcjonalne)
+  // Ten sam plik mozna wystawic na zwyklym adresie https (np. GitHub Pages) - wtedy YouTube dostaje poprawny Referer
+  // i nie zglasza bledu 153. Adres wpisujesz w Config.Projector.YouTube.Relay.
+  let player = null, apiReady = false, ready = false, curId = '';
+  const want = { id: '', playing: false, t: 0, at: 0, vol: 0.8, rate: 1 };
+  let lastRate = 1, durSent = '';
+  const errEl = document.getElementById('err');
+  const expected = () => want.t + (want.playing ? (performance.now() - want.at) / 1000 * want.rate : 0);
+
+  const stEl = document.getElementById('st');
+  let stTimer = 0;
+  function status(msg, keep) {
+    stEl.textContent = msg;
+    try { window.parent.postMessage({ type: 'ytstatus', s: msg }, '*'); } catch (e) {}
+    clearTimeout(stTimer);
+    if (!keep) stTimer = setTimeout(() => { stEl.textContent = ''; }, 4000);
+  }
+  status('Odtwarzacz YouTube: ładowanie API…', true);
+  setTimeout(() => { if (!apiReady) status('Nie udało się wczytać API YouTube (brak dostępu do youtube.com?)', true); }, 8000);
+  function showErr(msg) { errEl.textContent = msg; errEl.style.display = msg ? 'flex' : 'none'; }
+  const ERR = {
+    2: 'Nieprawidłowy identyfikator filmu.',
+    5: 'Błąd odtwarzacza HTML5.',
+    100: 'Film nie istnieje albo jest prywatny.',
+    101: 'Autor wyłączył odtwarzanie tego filmu poza YouTube.',
+    150: 'Autor wyłączył odtwarzanie tego filmu poza YouTube.',
+    153: 'YouTube odrzucił odtwarzacz (błąd 153: brak nagłówka Referer). Wystaw yt-player.html na adresie https i wpisz go w Config.Projector.YouTube.Relay.',
+  };
+
+  const tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  tag.onerror = () => status('Nie udało się wczytać API YouTube (zablokowane połączenie z youtube.com).', true);
+  document.head.appendChild(tag);
+  window.onYouTubeIframeAPIReady = function () { apiReady = true; status('API YouTube gotowe', false); build(); };
+
+  function build() {
+    if (!apiReady || !want.id || player) return;
+    curId = want.id;
+    const vars = { autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, playsinline: 1, fs: 0, iv_load_policy: 3, enablejsapi: 1, start: Math.max(0, Math.floor(expected())) };
+    if (location.protocol === 'http:' || location.protocol === 'https:') vars.origin = location.origin;
+    player = new YT.Player('p', {
+      videoId: want.id, host: 'https://www.youtube-nocookie.com', playerVars: vars,
+      events: {
+        onReady: () => { ready = true; status('Odtwarzacz gotowy, wczytywanie filmu…', true); apply(); },
+        onStateChange: (e) => {
+          const names = { '-1': 'nie rozpoczęto', 0: 'koniec', 1: 'gra', 2: 'pauza', 3: 'buforowanie', 5: 'film gotowy' };
+          status('YouTube: ' + (names[e.data] || e.data), e.data === 3 || e.data === -1);
+          if (e.data === 0) { try { window.parent.postMessage({ type: 'ytended' }, '*'); } catch (x) {} }
+          if (e.data === 1 && !want.playing) player.pauseVideo();
+          if (e.data === 1) showErr('');
+        },
+        onError: (e) => { showErr(ERR[e.data] || ('Błąd odtwarzacza YouTube (' + e.data + ').')); status('Kod błędu YouTube: ' + e.data, true); },
+        onAutoplayBlocked: () => { status('Autoodtwarzanie zablokowane, próba bez dźwięku…', false); try { player.mute(); player.playVideo(); } catch (x) {} },
+      },
+    });
+  }
+
+  let adSent = false;
+  function sendAd(on) { if (on === adSent) return; adSent = on; try { window.parent.postMessage({ type: 'ytad', on: on }, '*'); } catch (e) {} }
+  function apply() {
+    if (!want.id) { showErr(''); if (player && ready) { try { player.stopVideo(); } catch (e) {} } return; }
+    if (!player) { build(); return; }
+    if (!ready) return;
+    if (curId !== want.id) { curId = want.id; sendAd(false); showErr(''); player.loadVideoById({ videoId: want.id, startSeconds: Math.max(0, expected()) }); }
+    else {
+      let cur = 0, ad = false; try { cur = player.getCurrentTime(); const vd = player.getVideoData(); ad = !!(vd && vd.video_id && vd.video_id !== want.id); } catch (e) {}
+      sendAd(ad);
+      if (ad) { status('Reklama YouTube – synchronizacja wstrzymana do jej końca', true); return; }   // nie przewijaj reklamy
+      if (Math.abs(cur - expected()) > 1.5) player.seekTo(Math.max(0, expected()), true);
+    }
+    if (want.rate !== lastRate) { lastRate = want.rate; try { player.setPlaybackRate(want.rate); } catch (e) {} }
+    try { const du = player.getDuration(); if (du > 0 && durSent !== curId + ':' + Math.round(du)) { durSent = curId + ':' + Math.round(du); window.parent.postMessage({ type: 'ytdur', d: du }, '*'); } } catch (e) {}
+    if (want.playing) player.playVideo(); else player.pauseVideo();
+    try { player.setVolume(Math.round(Math.max(0, Math.min(1, want.vol)) * 100)); } catch (e) {}
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.source !== window.parent) return;
+    const d = e.data;
+    if (!d || d.type !== 'yt') return;
+    if (typeof d.id === 'string') want.id = d.id;
+    if (typeof d.playing === 'boolean') want.playing = d.playing;
+    if (typeof d.vol === 'number') want.vol = d.vol;
+    if (typeof d.rate === 'number' && d.rate > 0) want.rate = d.rate;
+    if (typeof d.t === 'number') { want.t = d.t; want.at = performance.now(); }
+    apply();
+  });
+  setInterval(() => { if (want.id && ready) apply(); }, 1500);
+</script>
+</body>
+</html>
